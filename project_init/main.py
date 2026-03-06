@@ -2,6 +2,8 @@ from pathlib import Path
 from .runner import run, run_capture
 from .env_writer import write_env_files
 from .scaffold import setup_visual_editing
+import subprocess
+
 
 SANITY_TEMPLATES = [
     ("clean", "Empty Studio (clean slate)"),
@@ -61,7 +63,7 @@ def main():
     template_choice = input("Select template (number): ").strip()
     try:
         choice_num = int(template_choice)
-        if 1 > choice_num or choice_num > 3:
+        if 1 > choice_num or choice_num > len(SANITY_TEMPLATES):
             template_idx = 0
         else:
             template_idx = choice_num - 1
@@ -94,29 +96,44 @@ def main():
         print(f"\n--- Setting up Sanity Studio ---\n")
         print(f"Creating studio with template: {template}")
 
-        cmd = [
-            "npx",
-            "sanity@latest",
-            "init",
-            "-y",
-            "--no-mcp",
-            "--template",
-            template,
-            "--project-id",
-            project_id,
-            "--dataset",
-            "production",
-            "--output-path",
-            str(studio_dir),
-            "--no-typescript" if template == "clean" else "--typescript",
-        ]
+        is_github_template = template.startswith("github:")
+
+        if is_github_template:
+            cmd = [
+                "npm",
+                "create",
+                "sanity@latest",
+                "--",
+                "--template",
+                template,
+                "--project-id",
+                project_id,
+                "--dataset",
+                "production",
+                "--output-path",
+                str(studio_dir),
+            ]
+        else:
+            cmd = [
+                "npx",
+                "sanity@latest",
+                "init",
+                "-y",
+                "--no-mcp",
+                "--template",
+                template,
+                "--project-id",
+                project_id,
+                "--dataset",
+                "production",
+                "--output-path",
+                str(studio_dir),
+                "--no-typescript" if template == "clean" else "--typescript",
+            ]
 
         print(f"\n>>> DEBUG: Running command: {' '.join(cmd)}")
 
-        # Run the command (--no-mcp and -y should handle all prompts)
         try:
-            import subprocess
-
             proc = subprocess.Popen(
                 cmd,
                 cwd=OUTPUT_DIR,
@@ -132,7 +149,7 @@ def main():
                 print(f"\n✗ Failed: {stderr}")
                 print("You can create it manually:")
                 print(f"  cd {OUTPUT_DIR / 'studio'}")
-                print(f"  sanity init -- --datase prodution --template {template} --project-id {project_id}")
+                print(f"  sanity init -- --dataset production --template {template} --project-id {project_id}")
         except Exception as e:
             print(f"\n✗ Failed to create Sanity Studio: {e}")
             print("You can create it manually:")
