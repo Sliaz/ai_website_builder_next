@@ -23,7 +23,14 @@ def main():
     figma_project_key = str(input("Enter the Figma Project Key: "))
     figma_project_key = figma_project_key.strip()
 
-    figma_connection = FigmaConnection(settings.figma_api_key, figma_project_key)
+    canvas_name = str(input("Enter the Figma Page/Canvas name (leave blank for Delivery): ")).strip()
+    start_canvas_name = canvas_name or None
+
+    figma_connection = FigmaConnection(
+        settings.figma_api_key,
+        figma_project_key,
+        start_canvas_name=start_canvas_name,
+    )
 
     # figma_connection.get_developer_variables()
 
