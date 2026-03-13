@@ -1,15 +1,36 @@
 from pathlib import Path
+import os
+import subprocess
+
 from .runner import run, run_capture
 from .env_writer import write_env_files
 from .scaffold import setup_visual_editing
-import subprocess
 
 
 SANITY_TEMPLATES = [
     ("clean", "Empty Studio (clean slate)"),
-    ("github:sanity-io/nextjs-blog-cms-sanity-v3", "Blog (posts, authors, categories)"),
+    ("blog", "Blog (posts, authors, categories)"),
     ("moviedb", "Movie Database (movies, actors, directors)"),
+    ("shopify", "Shopify (products, collections, categories)"),
 ]
+
+
+def is_sanity_authenticated() -> bool:
+    """Best-effort signal for whether the user is logged into the Sanity CLI."""
+    if os.getenv("SANITY_AUTH_TOKEN"):
+        return True
+
+    sanity_rc = Path.home() / ".sanityrc"
+    if sanity_rc.exists():
+        try:
+            content = sanity_rc.read_text()
+        except Exception:
+            return True
+
+        if "authToken" in content or "cliToken" in content or content.strip():
+            return True
+
+    return False
 
 
 def get_sanity_projects() -> list[dict]:
@@ -27,7 +48,7 @@ def get_sanity_projects() -> list[dict]:
                         name = parts[3] if len(parts) > 3 else "Unnamed"
                         projects.append({"projectId": project_id, "name": name})
             return projects
-    except:
+    except Exception:
         pass
     return []
 
@@ -72,8 +93,12 @@ def main():
     template = SANITY_TEMPLATES[template_idx][0]
     print(f"\n>>> DEBUG: Selected template: '{template}' (choice: '{template_choice}')")
 
-    # Check for existing projects
-    projects = get_sanity_projects()
+    # Check for existing projects if authenticated
+    projects: list[dict] = []
+    if is_sanity_authenticated():
+        projects = get_sanity_projects()
+    else:
+        print("\n(Sanity CLI not authenticated; skipping project lookup. Run `npx sanity login` or set SANITY_AUTH_TOKEN to enable auto-selection.)")
 
     project_id = None
 
@@ -88,81 +113,62 @@ def main():
             project_id = projects[int(proj_choice) - 1].get("projectId", "")
             print(f"  Using project: {project_id}")
 
+    if not project_id:
+        manual_project = input("\nEnter an existing Sanity project ID (leave blank to skip): ").strip()
+        if manual_project:
+            project_id = manual_project
+            print(f"  Using manually provided project: {project_id}")
+
     # Create studio directory
     studio_dir = OUTPUT_DIR / "studio"
     studio_dir.mkdir(exist_ok=True)
 
+    print(f"\n--- Setting up Sanity Studio ---\n")
+    print(f"Creating studio with template: {template}")
+
+    cmd = [
+        "npx",
+        "sanity@latest",
+        "init",
+        "--no-mcp",
+        "--template",
+        template,
+        "--dataset",
+        "production",
+        "--output-path",
+        str(studio_dir),
+        "--no-typescript" if template == "clean" else "--typescript",
+    ]
+
     if project_id:
-        print(f"\n--- Setting up Sanity Studio ---\n")
-        print(f"Creating studio with template: {template}")
-
-        is_github_template = template.startswith("github:")
-
-        if is_github_template:
-            cmd = [
-                "npm",
-                "create",
-                "sanity@latest",
-                "--",
-                "--template",
-                template,
-                "--project-id",
-                project_id,
-                "--dataset",
-                "production",
-                "--output-path",
-                str(studio_dir),
-            ]
-        else:
-            cmd = [
-                "npx",
-                "sanity@latest",
-                "init",
-                "-y",
-                "--no-mcp",
-                "--template",
-                template,
-                "--project-id",
-                project_id,
-                "--dataset",
-                "production",
-                "--output-path",
-                str(studio_dir),
-                "--no-typescript" if template == "clean" else "--typescript",
-            ]
-
-        print(f"\n>>> DEBUG: Running command: {' '.join(cmd)}")
-
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                cwd=OUTPUT_DIR,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-            stdout, stderr = proc.communicate(timeout=120)
-            if proc.returncode == 0:
-                print("\n✓ Sanity Studio created successfully!")
-            else:
-                print(f"\n✗ Failed: {stderr}")
-                print("You can create it manually:")
-                print(f"  cd {OUTPUT_DIR / 'studio'}")
-                print(f"  sanity init -- --dataset production --template {template} --project-id {project_id}")
-        except Exception as e:
-            print(f"\n✗ Failed to create Sanity Studio: {e}")
-            print("You can create it manually:")
-            print(f"  cd {OUTPUT_DIR / 'studio'}")
-            print(f"  sanity init -- --dataset production --template {template} --project-id {project_id}")
+        cmd.insert(3, "-y")
+        cmd.extend(["--project-id", project_id])
     else:
-        print(f"\n--- Setting up Sanity Studio ---\n")
-        print("No project selected. You'll need to create one manually.")
-        print(f"\nTo set up Sanity Studio:")
-        print(f"  1. Go to https://www.sanity.io/manage")
-        print(f"  2. Create a new project")
-        print(f"  3. Run: cd {OUTPUT_DIR / 'studio'}")
-        print(f"     sanity init -- --dataset production --template {template} --project-id YOUR_PROJECT_ID")
+        print(
+            "\nNo project ID detected; running Sanity init interactively so you can log in or create a project."
+        )
+
+    print(f"\n>>> DEBUG: Running command: {' '.join(cmd)}")
+
+    try:
+        run(cmd, cwd=OUTPUT_DIR)
+        print("\n✓ Sanity Studio created successfully!")
+    except subprocess.CalledProcessError as e:
+        print(f"\n✗ Failed to create Sanity Studio (exit {e.returncode})")
+        print("You can create it manually:")
+        print(f"  cd {OUTPUT_DIR / 'studio'}")
+        manual_project = project_id or "YOUR_PROJECT_ID"
+        print(
+            f"  sanity init -- --dataset production --template {template} --project-id {manual_project}"
+        )
+    except Exception as e:
+        print(f"\n✗ Failed to create Sanity Studio: {e}")
+        print("You can create it manually:")
+        print(f"  cd {OUTPUT_DIR / 'studio'}")
+        manual_project = project_id or "YOUR_PROJECT_ID"
+        print(
+            f"  sanity init -- --dataset production --template {template} --project-id {manual_project}"
+        )
 
     # Try to find project ID from created studio
     env_path = studio_dir / ".env"
