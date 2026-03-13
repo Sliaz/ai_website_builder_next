@@ -15,3 +15,7 @@ wheels/
 # Screenshots
 browser_screenshots/
 figma_screenshots/
+
+# the datbase ofc
+
+figma.db
