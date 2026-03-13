@@ -180,7 +180,7 @@ def main():
                 break
 
     # Generate env files
-    write_env_files(OUTPUT_DIR, project_id=project_id or "YOUR_PROJECT_ID")
+    write_env_files(OUTPUT_DIR, project_id=project_id)
 
     setup_visual_editing(OUTPUT_DIR, project_name)
 

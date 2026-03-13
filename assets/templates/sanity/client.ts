@@ -20,5 +20,5 @@ export const urlFor = (source: any) => {
   }
 };
 
-import { createImageUrlBuilder } from "next-sanity";
-const builder = createImageUrlBuilder(client);
+import imageUrlBuilder from "@sanity/image-url";
+const builder = imageUrlBuilder(client);

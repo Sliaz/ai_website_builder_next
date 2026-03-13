@@ -11,7 +11,7 @@ def main():
     print("=" * 50)
     print("\nSelect functionality:")
     print("1. Initialize new project (Next.js + Sanity + Visual Editing)")
-    print("2. Figma integration (coming soon)")
+    print("2. Figma integration (we will need you to pass in a file key)")
     print("3. AI component generation (coming soon)")
     print("4. Assembly (coming soon)")
     print("\n")

@@ -123,5 +123,6 @@ def setup_visual_editing(output_dir: Path, project_name: str) -> None:
     create_disable_draft_mode_component(output_dir)
     update_layout(output_dir)
     create_sanity_config(output_dir, project_name)
+    install_dependencies(output_dir)
 
     print("\nVisual Editing setup complete!")

@@ -5,8 +5,8 @@ import { presentationTool } from "sanity/presentation";
 export default defineConfig({
   name: "__PROJECT_NAME__",
   title: "__PROJECT_TITLE__",
-  projectId: process.env.SANITY_PROJECT_ID,
-  dataset: process.env.SANITY_DATASET || "production",
+  projectId: process.env.SANITY_STUDIO_PROJECT_ID || "your-project-id",
+  dataset: process.env.SANITY_STUDIO_DATASET || "production",
   basePath: "/studio",
   plugins: [
     structureTool(),

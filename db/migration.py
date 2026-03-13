@@ -32,7 +32,7 @@ class Component(SQLModel, table=True):
     description: str = ""
     remote: bool = Field(default=False)      # True = from a linked library file
     raw_node_json: Optional[str] = None      # hydrated in Step 3
-    thumbnail_url: Optional[str] = None
+    screenshot: Optional[str] = None
     updated_at: Optional[str] = None
 
     # FK → ComponentSet (None if standalone component, not a variant)

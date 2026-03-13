@@ -16,8 +16,8 @@ SANITY_VIEWER_TOKEN={viewer_token}
 
 SANITY_ENV_TEMPLATE = """
 # Sanity Studio - Private (used by Studio)
-SANITY_PROJECT_ID={project_id}
-SANITY_DATASET=production
+SANITY_STUDIO_PROJECT_ID={project_id}
+SANITY_STUDIO_DATASET=production
 
 # Preview origin - your Next.js frontend URL
 SANITY_STUDIO_PREVIEW_ORIGIN={preview_origin}
