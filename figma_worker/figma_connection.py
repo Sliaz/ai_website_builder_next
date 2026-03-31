@@ -46,12 +46,13 @@ class FigmaConnection:
         self.image_batch_size = 5  # Smaller batches to avoid overwhelming Figma API
         self.image_rate_limit_seconds = 1.0  # Longer delays between batches
         self.image_max_retries = 5
-        self.section_max_depth = 3
-        self.min_component_width = 40  # Skip components smaller than this
-        self.min_component_height = 40
+        self.section_max_depth = 1  # Only capture direct children of frames as sections
+        self.min_component_width = 100  # Skip components smaller than this
+        self.min_component_height = 100
 
     BASE_FIGMA_URL = "https://api.figma.com/v1"
-    SECTION_FRAME_TYPES = {"FRAME", "SECTION", "COMPONENT", "GROUP"}
+    # Only capture FRAME and SECTION nodes as components, not GROUP (too granular)
+    SECTION_FRAME_TYPES = {"FRAME", "SECTION"}
 
     def _debug(self, message: str, payload: dict[str, Any] | None = None) -> None:
         if not self.debug:
@@ -121,9 +122,18 @@ class FigmaConnection:
         if not self.data:
             raise ValueError("No Figma data loaded. Call get_file() first.")
 
+        # Clear old section components to avoid stale data
+        print("Clearing old section components...")
+        self.session.exec(delete(SectionComponent))
+        self.session.commit()
+
         self._persist_component_sets()
         self._persist_components()
         self._persist_pages_frames_and_usages()
+        
+        # Show count after processing
+        sections_count = len(self.session.exec(select(SectionComponent)).all())
+        print(f"\n✓ Processed {sections_count} section components")
         
         if self.fetch_screenshots:
             self._persist_section_component_screenshots()
@@ -238,6 +248,10 @@ class FigmaConnection:
         document = self.data.get("document", {})
         pages = [n for n in document.get("children", []) if n.get("type") == "CANVAS"]
 
+        print(f"\n=== Canvas Processing ===\nTotal canvases in file: {len(pages)}")
+        for p in pages:
+            print(f"  - {p.get('name', 'Unnamed')}")
+
         if self.start_canvas_name:
             target_pages = [
                 page
@@ -246,15 +260,20 @@ class FigmaConnection:
                 == self.start_canvas_name.strip().lower()
             ]
             if not target_pages:
-                self._debug(
-                    "Target canvas not found; processing full document",
-                    {"target": self.start_canvas_name},
-                )
+                print(f"⚠ Canvas '{self.start_canvas_name}' not found. Processing ALL canvases.")
                 target_pages = pages
+            else:
+                print(f"✓ Processing only canvas: '{self.start_canvas_name}'")
         else:
+            print("⚠ No canvas specified. Processing ALL canvases.")
             target_pages = pages
+        
+        print(f"Total canvases to process: {len(target_pages)}\n")
 
         for order, page in enumerate(target_pages):
+            canvas_name = page.get("name", "Unnamed")
+            print(f"Processing canvas: '{canvas_name}'")
+            
             if self.start_canvas_name and page not in pages:
                 # Should not happen, but guard to avoid inconsistent state.
                 continue
@@ -265,15 +284,20 @@ class FigmaConnection:
                     for f in page.get("children", []) or []
                     if f.get("id") and f.get("type") in {"FRAME", "COMPONENT", "SECTION"}
                 ]
+                print(f"  Found {len(frames)} top-level frames in '{canvas_name}' (each will be a separate page)")
                 for frame_order, frame in enumerate(frames):
-                    page_model = self._upsert_page(frame.get("id"), frame.get("name", ""), frame_order)
+                    frame_name = frame.get("name", "Unnamed")
+                    print(f"  Processing frame {frame_order + 1}/{len(frames)}: '{frame_name}'")
+                    page_model = self._upsert_page(frame.get("id"), frame_name, frame_order)
                     self.session.add(page_model)
                     self._persist_frame(page_model.page_id, frame)
             else:
-                page_model = self._upsert_page(page.get("id"), page.get("name", ""), order)
+                page_model = self._upsert_page(page.get("id"), canvas_name, order)
                 self.session.add(page_model)
 
-                for frame in page.get("children", []) or []:
+                frames = page.get("children", []) or []
+                print(f"  Found {len(frames)} frames in '{canvas_name}'")
+                for frame in frames:
                     self._persist_frame(page_model.page_id, frame)
 
         self.session.commit()
@@ -354,6 +378,16 @@ class FigmaConnection:
         if not sections:
             return
 
+        # Print statistics about sections
+        depth_counts = {}
+        for section in sections:
+            depth_counts[section.depth] = depth_counts.get(section.depth, 0) + 1
+        print(f"\n=== Section Component Statistics ===")
+        print(f"Total sections: {len(sections)}")
+        for depth in sorted(depth_counts.keys()):
+            print(f"  Depth {depth}: {depth_counts[depth]} components")
+        print("=" * 40)
+
         node_ids_requiring_images: list[str] = []
         targets: dict[str, tuple[SectionComponent, Path]] = {}
 
@@ -374,7 +408,7 @@ class FigmaConnection:
         if not node_ids_requiring_images:
             return
 
-        print(f"Downloading screenshots for {len(node_ids_requiring_images)} section components...")
+        print(f"\nDownloading screenshots for {len(node_ids_requiring_images)} section components...")
         screenshot_bytes_map = self._fetch_component_screenshots(node_ids_requiring_images)
 
         saved_count = 0
@@ -454,108 +488,129 @@ class FigmaConnection:
         depth: int,
         parent_section_id: str | None,
     ) -> None:
+        """
+        Extract section components from a frame.
+        With section_max_depth=1, only direct children of frames are captured as sections.
+        This provides semantic page sections (Hero, Features, Footer) without thousands of nested elements.
+        """
         children = node.get("children") or []
         if not children:
+            return
+
+        # If we're at depth 0 (the frame itself), process its direct children
+        # If we're already at depth >= section_max_depth, stop processing
+        if depth >= self.section_max_depth:
             return
 
         for order, child in enumerate(children):
             node_id = child.get("id")
             node_type = child.get("type")
+            
             if not node_id or not node_type:
-                # Still traverse to reach nested frames even if this node lacks metadata
-                self._persist_section_components(
-                    page_id, root_frame_id, child, depth, parent_section_id
-                )
                 continue
 
-            # Skip if this is an instance of a real component (already tracked separately)
+            # Skip component instances (tracked separately)
             if node_type == "INSTANCE" and child.get("componentId"):
-                # This is an instance of a component, skip creating a section for it
-                # but still recurse to find nested instances
-                self._persist_section_components(
-                    page_id, root_frame_id, child, depth, parent_section_id
+                continue
+            
+            # Only capture FRAME and SECTION types as section components
+            if node_type not in self.SECTION_FRAME_TYPES:
+                continue
+            
+            bbox = child.get("absoluteBoundingBox") or {}
+            width = bbox.get("width")
+            height = bbox.get("height")
+            
+            # Skip invisible nodes
+            visible = child.get("visible", True)
+            if not visible:
+                self._debug(
+                    "Skipping invisible section",
+                    {"node_id": node_id, "name": child.get("name", ""), "type": node_type},
                 )
                 continue
             
-            counts_toward_depth = node_type in self.SECTION_FRAME_TYPES
-            next_depth = depth + 1 if counts_toward_depth else depth
-            next_parent_id = parent_section_id
-
-            if counts_toward_depth and next_depth <= self.section_max_depth:
-                bbox = child.get("absoluteBoundingBox") or {}
-                width = bbox.get("width")
-                height = bbox.get("height")
-                
-                # Skip tiny components (likely decorative elements like dots, small icons)
-                if width and height and (width < self.min_component_width or height < self.min_component_height):
-                    self._debug(
-                        "Skipping small section component",
-                        {"node_id": node_id, "name": child.get("name", ""), "size": f"{width}x{height}"},
-                    )
-                    # Still recurse in case there are larger nested elements
-                    self._persist_section_components(
-                        page_id, root_frame_id, child, depth, parent_section_id
-                    )
-                    continue
-                
-                raw_json = json.dumps(child)
-
-                section_component = self.session.get(SectionComponent, node_id)
-                if section_component is None:
-                    section_component = SectionComponent(
-                        node_id=node_id,
-                        page_id=page_id,
-                        root_frame_id=root_frame_id,
-                        parent_node_id=parent_section_id,
-                        depth=next_depth,
-                        order=order,
-                        name=child.get("name", ""),
-                        width=width,
-                        height=height,
-                        raw_node_json=raw_json,
-                    )
-                    self._debug(
-                        "Section component created",
-                        {
-                            "node_id": node_id,
-                            "name": section_component.name,
-                            "depth": next_depth,
-                        },
-                    )
-                else:
-                    section_component.page_id = page_id
-                    section_component.root_frame_id = root_frame_id
-                    section_component.parent_node_id = parent_section_id
-                    section_component.depth = next_depth
-                    section_component.order = order
-                    section_component.name = child.get(
-                        "name", section_component.name
-                    )
-                    section_component.width = width or section_component.width
-                    section_component.height = height or section_component.height
-                    section_component.raw_node_json = raw_json or section_component.raw_node_json
-                    self._debug(
-                        "Section component updated",
-                        {
-                            "node_id": node_id,
-                            "name": section_component.name,
-                            "depth": next_depth,
-                        },
-                    )
-
-                self.session.add(section_component)
-                next_parent_id = node_id
-
-            # Continue recursing into children
-            # Only recurse if we haven't exceeded depth limit OR if this node didn't count toward depth
-            if (counts_toward_depth and next_depth <= self.section_max_depth) or (not counts_toward_depth):
-                self._persist_section_components(
-                    page_id,
-                    root_frame_id,
-                    child,
-                    depth=next_depth,
-                    parent_section_id=next_parent_id,
+            # Skip zero-opacity nodes
+            opacity = child.get("opacity", 1.0)
+            if opacity <= 0:
+                self._debug(
+                    "Skipping zero-opacity section",
+                    {"node_id": node_id, "name": child.get("name", ""), "type": node_type},
                 )
+                continue
+            
+            # Skip mask nodes
+            if child.get("isMask", False):
+                self._debug(
+                    "Skipping mask section",
+                    {"node_id": node_id, "name": child.get("name", ""), "type": node_type},
+                )
+                continue
+            
+            # Skip nodes with invalid dimensions
+            if not width or not height or width <= 0 or height <= 0:
+                self._debug(
+                    "Skipping zero-dimension section",
+                    {"node_id": node_id, "name": child.get("name", ""), "type": node_type, "size": f"{width}x{height}"},
+                )
+                continue
+            
+            # Skip tiny components
+            if width < self.min_component_width or height < self.min_component_height:
+                self._debug(
+                    "Skipping small section",
+                    {"node_id": node_id, "name": child.get("name", ""), "type": node_type, "size": f"{width}x{height}"},
+                )
+                continue
+            
+            # Create or update the section component
+            raw_json = json.dumps(child)
+            section_component = self.session.get(SectionComponent, node_id)
+            
+            if section_component is None:
+                section_component = SectionComponent(
+                    node_id=node_id,
+                    page_id=page_id,
+                    root_frame_id=root_frame_id,
+                    parent_node_id=parent_section_id,
+                    depth=depth + 1,
+                    order=order,
+                    name=child.get("name", ""),
+                    width=width,
+                    height=height,
+                    raw_node_json=raw_json,
+                )
+                print(f"  → Creating section: '{child.get('name', '')}' ({node_type}, {width:.0f}x{height:.0f}px)")
+                self._debug(
+                    "Section component created",
+                    {
+                        "node_id": node_id,
+                        "name": section_component.name,
+                        "depth": depth + 1,
+                        "type": node_type,
+                    },
+                )
+            else:
+                section_component.page_id = page_id
+                section_component.root_frame_id = root_frame_id
+                section_component.parent_node_id = parent_section_id
+                section_component.depth = depth + 1
+                section_component.order = order
+                section_component.name = child.get("name", section_component.name)
+                section_component.width = width or section_component.width
+                section_component.height = height or section_component.height
+                section_component.raw_node_json = raw_json or section_component.raw_node_json
+                self._debug(
+                    "Section component updated",
+                    {
+                        "node_id": node_id,
+                        "name": section_component.name,
+                        "depth": depth + 1,
+                        "type": node_type,
+                    },
+                )
+
+            self.session.add(section_component)
     def _record_component_usages(
         self, page_id: str, frame_id: str | None, node: dict[str, Any]
     ) -> None:
@@ -741,16 +796,20 @@ class FigmaConnection:
             images_payload = response.json().get("images", {})
             missing = [node_id for node_id in node_ids if not images_payload.get(node_id)]
             if missing:
-                raise RuntimeError(
-                    f"Figma did not return image URLs for node_ids: {', '.join(missing)}"
-                )
+                print(f"\n  ⚠ Warning: Figma did not return image URLs for {len(missing)} node(s): {', '.join(missing[:5])}")
+                if len(missing) > 5:
+                    print(f"    ... and {len(missing) - 5} more")
+                print("  Continuing with nodes that have valid image URLs...")
 
             bytes_map: dict[str, bytes] = {}
             for node_id, image_url in images_payload.items():
+                if not image_url:
+                    # Skip null/empty URLs
+                    continue
                 try:
                     bytes_map[node_id] = self._download_image_bytes(image_url)
                 except Exception as e:
-                    print(f" ⚠ Failed to download {node_id}: {str(e)[:50]}")
+                    print(f"\n  ⚠ Failed to download {node_id}: {str(e)[:50]}")
                     # Continue with other images instead of failing completely
                     continue
 
