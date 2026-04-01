@@ -2,6 +2,9 @@ from typing import TypeDict
 from langgraph.graph import StateGraph, START, END
 from utils.save_file import save_file
 
+# ! i just realized that the website needs to be assembled as it is built, since I can't actually test it otherwise
+# ! so this worker needs to be able to assemble the website as it goes
+
 class ComponentState(TypeDict):
     key: str # not sure this is actually useful
     node_id: str # not sure this is actually useful
