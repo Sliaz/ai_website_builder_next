@@ -31,9 +31,11 @@ class Component(SQLModel, table=True):
     name: str
     description: str = ""
     remote: bool = Field(default=False)      # True = from a linked library file
-    raw_node_json: Optional[str] = None      # hydrated in Step 3
+    raw_node_json: Optional[str] = None      # full Figma node data with all properties
     screenshot: Optional[str] = None
     updated_at: Optional[str] = None
+    width: Optional[float] = None
+    height: Optional[float] = None
 
     # FK → ComponentSet (None if standalone component, not a variant)
     component_set_key: Optional[str] = Field(

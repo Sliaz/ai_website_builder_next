@@ -129,11 +129,14 @@ class FigmaConnection:
 
         self._persist_component_sets()
         self._persist_components()
+        self._enrich_components_from_tree()
         self._persist_pages_frames_and_usages()
         
         # Show count after processing
         sections_count = len(self.session.exec(select(SectionComponent)).all())
+        components_enriched = len([c for c in self.session.exec(select(Component)).all() if c.raw_node_json])
         print(f"\n✓ Processed {sections_count} section components")
+        print(f"✓ Enriched {components_enriched} components with full node data")
         
         if self.fetch_screenshots:
             self._persist_section_component_screenshots()
@@ -215,6 +218,8 @@ class FigmaConnection:
                     raw_node_json=None,
                     screenshot=None,
                     component_set_key=component_set_key,
+                    width=None,
+                    height=None,
                 )
                 self._debug(
                     "Component created",
@@ -611,6 +616,57 @@ class FigmaConnection:
                 )
 
             self.session.add(section_component)
+
+    def _enrich_components_from_tree(self) -> None:
+        """Traverse the document tree to find COMPONENT nodes and enrich them with full data."""
+        assert self.data is not None
+        
+        print("\n=== Enriching components with full node data ===")
+        document = self.data.get("document", {})
+        
+        # Traverse the entire document tree
+        self._find_and_enrich_component_nodes(document)
+        
+        self.session.commit()
+    
+    def _find_and_enrich_component_nodes(self, node: dict[str, Any]) -> None:
+        """Recursively traverse the node tree to find and enrich COMPONENT nodes."""
+        node_type = node.get("type")
+        node_id = node.get("id")
+        
+        # If this is a COMPONENT node, enrich it
+        if node_type == "COMPONENT" and node_id:
+            key = self.component_keys_by_node_id.get(node_id)
+            if key:
+                component = self.session.get(Component, key)
+                if component:
+                    # Store the full node JSON with all properties
+                    component.raw_node_json = json.dumps(node)
+                    
+                    # Extract dimensional data
+                    bbox = node.get("absoluteBoundingBox") or {}
+                    component.width = bbox.get("width")
+                    component.height = bbox.get("height")
+                    
+                    self.session.add(component)
+                    print(f"  → Enriched component: '{component.name}' ({component.width}x{component.height}px)")
+                    self._debug(
+                        "Component enriched with full node data",
+                        {
+                            "key": key,
+                            "node_id": node_id,
+                            "name": component.name,
+                            "has_children": len(node.get("children", [])) > 0,
+                            "has_styles": bool(node.get("styles")),
+                            "has_fills": bool(node.get("fills")),
+                        },
+                    )
+        
+        # Recurse through all children
+        for child in node.get("children", []) or []:
+            self._find_and_enrich_component_nodes(child)
+
+            
     def _record_component_usages(
         self, page_id: str, frame_id: str | None, node: dict[str, Any]
     ) -> None:
