@@ -1,11 +1,10 @@
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ai_worker.factory import Factory
-from ai_worker.component_worker import ComponentState, design_sanity_schema, save_sanity_schema
+from ai_worker.component_worker import ComponentState, design_sanity_schema, save_sanity_schema, populate_component_data
 from ai_worker.utils.prompts import generate_sanity_schema
 from sqlmodel import Session, select
 from db.migration import SectionComponent, create_db_and_tables
-from ai_worker.playwright_tester import Playwright
 from pathlib import Path
 
 def get_ai_client():
@@ -104,15 +103,20 @@ def process_single_component(component_data: dict, ai_client, project_path: str)
         
         # 3. Save sanity schema
         print(f"[{component_name}] Saving schema to project...")
-        final_state = save_sanity_schema(state_after_design)
+        state_after_saving = save_sanity_schema(state_after_design)
         
-        print(f"[{component_name}] ✓ Complete - Schema: {final_state.get('sanity_schema_filename', 'unknown')}.ts")
+        print(f"[{component_name}] ✓ Complete - Schema: {state_after_saving.get('sanity_schema_filename', 'unknown')}.ts")
+
+        final_state = populate_component_data(state_after_saving)
+
         return {
             "component_data": component_data,
             "status": "success",
             "error": None,
             "schema_filename": final_state.get("sanity_schema_filename", "")
         }
+
+
         
     except Exception as e:
         print(f"[{component_data['name']}] ✗ Error: {e}")
@@ -186,12 +190,20 @@ def main():
         print(f"Provider: {ai_client.provider}")
         print(f"Model: {ai_client.model}")
         
-        # Get project path
-        PYTHON_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-        BUILDER_ROOT = PYTHON_PROJECT_ROOT.parent
-        OUTPUT_DIR = BUILDER_ROOT / "test_project_init" # TODO: do not hardcode this. find a way to manage global state for this project
-        project_path = OUTPUT_DIR
-        print(f"Using project path: {project_path}")
+        # Get project path from global state
+        from ai_worker.utils.global_state import get_state
+        state = get_state()
+        project_path = state.project_path
+        
+        if not project_path:
+            # Fallback to hardcoded path if not configured
+            PYTHON_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+            BUILDER_ROOT = PYTHON_PROJECT_ROOT.parent
+            OUTPUT_DIR = BUILDER_ROOT / "test_project_init"
+            project_path = str(OUTPUT_DIR)
+            print(f"⚠️  No project path in global state, using fallback: {project_path}")
+        else:
+            print(f"✓ Using project path from global state: {project_path}")
         
         # Process components in parallel
         max_workers = 3  # Reduced for testing

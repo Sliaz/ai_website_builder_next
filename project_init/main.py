@@ -1,6 +1,14 @@
 from pathlib import Path
 import os
 import subprocess
+import sys
+
+# Add parent directory to path for imports
+if __package__ is None or __package__ == "":
+    current_dir = Path(__file__).resolve().parent
+    repo_root = current_dir.parent
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
 
 from .runner import run, run_capture
 
@@ -168,6 +176,29 @@ def main():
     
     # Extract project configuration
     config = get_project_config(OUTPUT_DIR)
+    
+    # Save to global state for use by other parts of the system
+    if config:
+        try:
+            from ai_worker.utils.global_state import set_project_config
+            
+            # Get token from environment or prompt user
+            sanity_token = os.getenv("SANITY_AUTH_TOKEN")
+            if not sanity_token:
+                print("\n⚠️  SANITY_AUTH_TOKEN not found in environment.")
+                print("You can set it later in the .env file or provide it now.")
+                token_input = input("Enter Sanity auth token (or press Enter to skip): ").strip()
+                sanity_token = token_input if token_input else None
+            
+            set_project_config(
+                project_name=project_name,
+                project_path=str(OUTPUT_DIR),
+                sanity_project_id=config.get('projectId', ''),
+                sanity_dataset=config.get('dataset', 'production'),
+                sanity_token=sanity_token
+            )
+        except Exception as e:
+            print(f"\n⚠️  Could not save project configuration: {e}")
     
     print("\n" + "="*60)
     print("   Setup Complete!")

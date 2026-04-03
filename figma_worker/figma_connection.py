@@ -13,6 +13,7 @@ from db.migration import (
     Component,
     ComponentSet,
     ComponentUsage,
+    ExtractedImage,
     Frame,
     Page,
     SectionComponent,
@@ -37,12 +38,15 @@ class FigmaConnection:
         self.batch_size = batch_size
         self.session = create_db_and_tables(db_path)
         self.data: dict[str, Any] | None = None
+        self.images_map: dict[str, str] = {}  # imageRef -> URL mapping
         self.component_keys_by_node_id: dict[str, str] = {}
         self.debug = os.getenv("DEV", "").lower() in {"1", "true", "yes"}
         self.start_canvas_name = start_canvas_name
         self.fetch_screenshots = fetch_screenshots
         self.figma_screenshots_dir = Path("assets") / "figma_screenshots"
         self.figma_screenshots_dir.mkdir(parents=True, exist_ok=True)
+        self.figma_images_dir = Path("assets") / "figma_images"
+        self.figma_images_dir.mkdir(parents=True, exist_ok=True)
         self.image_batch_size = 5  # Smaller batches to avoid overwhelming Figma API
         self.image_rate_limit_seconds = 1.0  # Longer delays between batches
         self.image_max_retries = 5
@@ -107,14 +111,29 @@ class FigmaConnection:
         return payload
 
     def get_file(self) -> dict:
+        # Request with geometry=paths to ensure we get image data
+        # and plugin_data + images to get embedded image URLs
+        params = {
+            "geometry": "paths",
+            "plugin_data": "shared"
+        }
         response = requests.get(
             f"{self.BASE_FIGMA_URL}/files/{self.figma_project_key}",
             headers={"X-Figma-Token": self.figma_token},
+            params=params
         )
 
         response.raise_for_status()
         data = response.json()
         self.data = data
+        # Store images map for embedded image downloads
+        self.images_map = data.get("images", {})
+        if self.images_map:
+            print(f"Found {len(self.images_map)} image assets in file")
+            if self.debug:
+                print(f"  Sample imageRefs: {list(self.images_map.keys())[:3]}")
+        else:
+            print("⚠️  No images map in file response - embedded images may not download")
         self._persist_file_contents()
         return data
 
@@ -141,6 +160,7 @@ class FigmaConnection:
         if self.fetch_screenshots:
             self._persist_section_component_screenshots()
             self._persist_component_screenshots()
+            self._extract_and_download_embedded_images()
         else:
             print("Skipping screenshot downloads (fetch_screenshots=False)")
 
@@ -936,6 +956,337 @@ class FigmaConnection:
             # If processing fails, return original bytes
             self._debug(f"Failed to process image: {e}")
             return image_bytes
+
+    def _extract_and_download_embedded_images(self) -> None:
+        """
+        Extract and download embedded images (photos, logos, etc.) from section components.
+        This is different from section screenshots - these are actual images embedded in the design.
+        """
+        print("\n=== Extracting Embedded Images from Sections ===")
+        
+        sections = self.session.exec(select(SectionComponent)).all()
+        if not sections:
+            print("No sections to extract images from")
+            return
+        
+        # Find all image fills in all sections
+        image_data_list = []
+        for section in sections:
+            if not section.raw_node_json:
+                continue
+            
+            try:
+                node = json.loads(section.raw_node_json)
+                images = self._find_image_fills_in_node(node, section.node_id, section.name)
+                image_data_list.extend(images)
+            except Exception as e:
+                self._debug(f"Error parsing section {section.node_id}: {e}")
+                continue
+        
+        if not image_data_list:
+            print("No embedded images found in sections")
+            return
+        
+        print(f"Found {len(image_data_list)} embedded images across {len(sections)} sections")
+        
+        # Debug: Show what data we have
+        if self.debug and image_data_list:
+            sample = image_data_list[0]
+            print(f"  Sample image data:")
+            print(f"    - image_ref: {sample.get('image_ref', 'None')[:50] if sample.get('image_ref') else 'None'}...")
+            print(f"    - node_id: {sample.get('node_id', 'None')}")
+            print(f"    - node_name: {sample.get('node_name', 'None')}")
+        
+        # Group by imageRef to get unique images
+        images_by_ref = {}
+        for img_data in image_data_list:
+            ref = img_data["image_ref"]
+            if ref and ref not in images_by_ref:
+                images_by_ref[ref] = []
+            if ref:
+                images_by_ref[ref].append(img_data)
+        
+        print(f"Unique images to download: {len(images_by_ref)}")
+        
+        # Strategy: Try multiple methods to get the actual images
+        # 1. Check images_map from file response
+        # 2. Try API request for image fills
+        # 3. Fall back to rendering the nodes containing the images
+        
+        print("  → Attempting to fetch original image files...")
+        image_urls = {}
+        
+        # Method 1: Check pre-loaded images_map
+        if self.images_map:
+            for image_ref in images_by_ref.keys():
+                if image_ref in self.images_map:
+                    image_urls[image_ref] = self.images_map[image_ref]
+            if image_urls:
+                print(f"    Found {len(image_urls)} URLs in images_map")
+        
+        # Method 2: Try API request
+        remaining_refs = [ref for ref in images_by_ref.keys() if ref not in image_urls]
+        if remaining_refs:
+            api_urls = self._request_image_fills_urls(remaining_refs)
+            image_urls.update(api_urls)
+        
+        # If we got URLs, download the original images
+        if image_urls:
+            print(f"  → Downloading {len(image_urls)} original image files...")
+            downloaded_count = 0
+            
+            for image_ref, image_url in image_urls.items():
+                try:
+                    image_bytes = self._download_image_bytes(image_url)
+                    
+                    # Save to disk
+                    usages = images_by_ref[image_ref]
+                    usage = usages[0]
+                    safe_name = usage["node_name"].replace("/", "_").replace(":", "_")[:50]
+                    safe_ref = image_ref[:20].replace("/", "_").replace(":", "_")
+                    filename = f"image_{safe_name}_{safe_ref}.png"
+                    image_path = self.figma_images_dir / filename
+                    image_path.write_bytes(image_bytes)
+                    
+                    # Store in database for all usages
+                    for usage in usages:
+                        existing = self.session.exec(
+                            select(ExtractedImage).where(
+                                ExtractedImage.section_node_id == usage["section_node_id"],
+                                ExtractedImage.node_id == usage["node_id"]
+                            )
+                        ).first()
+                        
+                        if existing:
+                            existing.local_path = str(image_path)
+                            existing.image_ref = image_ref
+                            self.session.add(existing)
+                        else:
+                            extracted_img = ExtractedImage(
+                                image_ref=image_ref,
+                                section_node_id=usage["section_node_id"],
+                                node_id=usage["node_id"],
+                                node_name=usage["node_name"],
+                                node_path=usage["node_path"],
+                                local_path=str(image_path),
+                                scale_mode=usage["scale_mode"]
+                            )
+                            self.session.add(extracted_img)
+                    
+                    downloaded_count += 1
+                    if downloaded_count % 5 == 0:
+                        print(f"    Downloaded {downloaded_count}/{len(image_urls)} images...")
+                        
+                except Exception as e:
+                    if self.debug:
+                        print(f"    ✗ Failed to download {image_ref[:20]}: {str(e)}")
+                    continue
+            
+            self.session.commit()
+            print(f"✓ Downloaded {downloaded_count} original images")
+            
+            # Report any that couldn't be downloaded
+            remaining = len(images_by_ref) - len(image_urls)
+            if remaining > 0:
+                print(f"⚠️  {remaining} images had no downloadable URLs")
+        
+        else:
+            # Method 3: Fall back to rendering nodes containing images
+            print("  ⚠️  No direct image URLs available")
+            print("  → Falling back to rendering image-containing nodes...")
+            
+            # Group by node_id for rendering
+            images_by_node = {}
+            for image_ref, usages in images_by_ref.items():
+                for usage in usages:
+                    node_id = usage["node_id"]
+                    if node_id not in images_by_node:
+                        images_by_node[node_id] = usage
+            
+            node_ids = list(images_by_node.keys())
+            rendered_images = self._fetch_component_screenshots(node_ids)
+            
+            if rendered_images:
+                print(f"  → Rendered {len(rendered_images)} image nodes")
+                saved_count = 0
+                
+                for node_id, image_bytes in rendered_images.items():
+                    try:
+                        usage = images_by_node[node_id]
+                        safe_name = usage["node_name"].replace("/", "_").replace(":", "_")[:50]
+                        filename = f"rendered_{safe_name}_{node_id.replace(':', '_')}.png"
+                        image_path = self.figma_images_dir / filename
+                        
+                        processed_bytes = self._add_white_background(image_bytes)
+                        image_path.write_bytes(processed_bytes)
+                        
+                        existing = self.session.exec(
+                            select(ExtractedImage).where(
+                                ExtractedImage.section_node_id == usage["section_node_id"],
+                                ExtractedImage.node_id == node_id
+                            )
+                        ).first()
+                        
+                        if existing:
+                            existing.local_path = str(image_path)
+                            self.session.add(existing)
+                        else:
+                            extracted_img = ExtractedImage(
+                                image_ref=usage.get("image_ref"),
+                                section_node_id=usage["section_node_id"],
+                                node_id=node_id,
+                                node_name=usage["node_name"],
+                                node_path=usage["node_path"],
+                                local_path=str(image_path),
+                                scale_mode=usage["scale_mode"]
+                            )
+                            self.session.add(extracted_img)
+                        
+                        saved_count += 1
+                    except Exception as e:
+                        if self.debug:
+                            print(f"    ✗ Failed to save {node_id}: {str(e)}")
+                        continue
+                
+                self.session.commit()
+                print(f"✓ Saved {saved_count} rendered images (containing original images)")
+            else:
+                print("  ✗ Could not download images via any method")
+    
+    def _find_image_fills_in_node(
+        self, 
+        node: dict[str, Any], 
+        section_node_id: str,
+        section_name: str,
+        path: str = ""
+    ) -> list[dict[str, Any]]:
+        """
+        Recursively find all IMAGE fills in a node tree.
+        Returns list of dicts with image metadata.
+        
+        Strategy: Instead of trying to fetch imageRefs (which aren't valid node IDs),
+        we'll render the actual nodes that contain image fills.
+        """
+        image_fills = []
+        node_name = node.get("name", "")
+        current_path = f"{path}/{node_name}" if path else node_name
+        node_id = node.get("id", "")
+        node_type = node.get("type", "")
+        
+        # Check fills for IMAGE type
+        has_image_fill = False
+        fills = node.get("fills", [])
+        if isinstance(fills, list):
+            for fill in fills:
+                if fill.get("type") == "IMAGE":
+                    has_image_fill = True
+                    image_ref = fill.get("imageRef")
+                    # Some images might have direct URLs instead of refs
+                    direct_url = fill.get("url")
+                    
+                    # Store both the imageRef and the node_id that contains it
+                    # We'll render the node_id instead of fetching the imageRef
+                    if image_ref or direct_url or node_id:
+                        image_fills.append({
+                            "image_ref": image_ref,
+                            "direct_url": direct_url,  # Might be None
+                            "section_node_id": section_node_id,
+                            "node_id": node_id,  # The node containing the image
+                            "node_name": node_name,
+                            "node_path": current_path,
+                            "node_type": node_type,
+                            "scale_mode": fill.get("scaleMode", "FILL"),
+                            "has_image_fill": True  # Flag to render this node
+                        })
+        
+        # Recurse through children
+        children = node.get("children", [])
+        if isinstance(children, list):
+            for child in children:
+                child_images = self._find_image_fills_in_node(
+                    child, 
+                    section_node_id,
+                    section_name,
+                    current_path
+                )
+                image_fills.extend(child_images)
+        
+        return image_fills
+    
+    def _request_image_fills_urls(self, image_refs: list[str]) -> dict[str, str]:
+        """
+        Request URLs for image fills by fetching the file with image export.
+        
+        The Figma API provides image URLs through a separate request that exports
+        the image fills as downloadable assets.
+        
+        Args:
+            image_refs: List of imageRef hashes from IMAGE fills
+            
+        Returns:
+            Dict mapping imageRef -> download URL
+        """
+        if not image_refs:
+            return {}
+        
+        print(f"    Requesting image fill URLs for {len(image_refs)} images...")
+        
+        # Use the /images endpoint with SVG format to get fill images
+        # This is a workaround - request image fills as part of node exports
+        url = f"{self.BASE_FIGMA_URL}/images/{self.figma_project_key}"
+        headers = {"X-Figma-Token": self.figma_token}
+        
+        all_urls = {}
+        
+        # Try batch requests
+        batch_size = 50
+        for i in range(0, len(image_refs), batch_size):
+            batch = image_refs[i:i + batch_size]
+            
+            # Format imageRefs with 'I' prefix as Figma expects for image fills
+            # ImageRefs need to be prefixed to be recognized as fill references
+            formatted_ids = ",".join([f"I{ref}" if not ref.startswith("I") else ref for ref in batch])
+            
+            params = {
+                "ids": formatted_ids,
+                "format": "png",
+                "svg_include_id": "true"
+            }
+            
+            try:
+                response = requests.get(url, headers=headers, params=params, timeout=30)
+                
+                if self.debug:
+                    print(f"    Batch {i//batch_size + 1}: Status {response.status_code}")
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    images = data.get("images", {})
+                    
+                    # Map back without the 'I' prefix
+                    for key, img_url in images.items():
+                        if img_url:
+                            # Remove 'I' prefix if present
+                            clean_key = key[1:] if key.startswith("I") else key
+                            all_urls[clean_key] = img_url
+                    
+                    if self.debug:
+                        print(f"    Got {len(images)} URLs from batch")
+                        
+                elif response.status_code == 400:
+                    if self.debug:
+                        print(f"    400 error - imageRefs not recognized as exportable IDs")
+                    # ImageRefs can't be exported directly
+                    break
+                    
+                time.sleep(0.5)  # Rate limiting
+                
+            except Exception as e:
+                if self.debug:
+                    print(f"    Error in batch {i//batch_size + 1}: {e}")
+                continue
+        
+        return all_urls
 
     def hydrate_components(self):
         sections = self.session.exec(select(SectionComponent)).all()

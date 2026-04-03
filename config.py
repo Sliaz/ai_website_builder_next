@@ -11,6 +11,9 @@ class Settings(BaseSettings):
     gemini_api_key: Optional[str] = None
     claude_api_key: Optional[str] = None
     figma_api_key: Optional[str] = None
+    sanity_project_id: Optional[str] = None
+    sanity_dataset: Optional[str] = "production"
+    sanity_token: Optional[str] = None
     dev: bool = False
 
 

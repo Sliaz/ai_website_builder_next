@@ -45,7 +45,7 @@ class Factory(ABC):
         pass
 
     @abstractmethod
-    def design_query_model(self, prompt, system_prompt=None):
+    def design_query_model(self, prompt, state, queries, system_prompt=None):
         """Process design query"""
         pass
 

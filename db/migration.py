@@ -108,6 +108,23 @@ class SectionComponent(SQLModel, table=True):
 
 
 # ─────────────────────────────────────────────────────────────
+# EXTRACTED IMAGES (embedded images from designs)
+# ─────────────────────────────────────────────────────────────
+
+class ExtractedImage(SQLModel, table=True):
+    __tablename__ = "extracted_images"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    image_ref: str = Field(index=True)  # Figma imageRef hash
+    section_node_id: str = Field(foreign_key="section_components.node_id")  # parent section
+    node_id: str  # specific node containing the image
+    node_name: str = ""  # name of the node with the image
+    node_path: str = ""  # path like "Hero/Background/Image"
+    local_path: Optional[str] = None  # path to downloaded image file
+    scale_mode: str = "FILL"  # FILL, FIT, CROP, TILE
+
+
+# ─────────────────────────────────────────────────────────────
 # COMPONENT USAGES  (junction: which component is used where)
 # ─────────────────────────────────────────────────────────────
 

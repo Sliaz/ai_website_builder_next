@@ -1,3 +1,4 @@
+import re
 from typing import TypedDict
 from langgraph.graph import StateGraph, START, END
 from ai_worker.utils.save_file import save_file
@@ -47,8 +48,16 @@ def save_component(state: ComponentState) -> ComponentState:
 def design_query(state: ComponentState, prompt, design_query_model) -> ComponentState:
     """This node is in charge of designing the query for the component"""
     try:
-        query = design_query_model(prompt, state)
-        state["query_code"] = query
+        project_path = state.get("project_path", "")
+        queries_path = os.path.join(project_path, "frontend", "sanity", "lib", "queries.ts")
+
+        with open(queries_path, "r") as f:
+            queries = f.read()
+        
+        prompt = f"{prompt}\n\nExisting queries:\n{queries}"
+        
+        query = design_query_model(prompt, state, queries)
+        state["query_code"] = query # in here I now have the getPageQuery var inside the string
         return state
     except Exception as e:
         print(f"Error designing query: {e}")
@@ -56,12 +65,42 @@ def design_query(state: ComponentState, prompt, design_query_model) -> Component
 
 def save_query(state: ComponentState) -> ComponentState:
     """This node is in charge of saving the query for the component"""
-    try:
-        save_file("./queries", state["query_code"], f"{state['component_name']}", "ts")
-        # i could save the path in the db so reconstructing this afterwards is easy
+
+    import os
+    import re
+
+    try: 
+        project_path = state.get("project_path", "")
+        queries_path = os.path.join(project_path, "frontend", "sanity", "lib", "queries.ts")
+
+        new_getPageQuery = state.get("query_code", "")
+
+        if not new_getPageQuery:
+            print(f"No query code found in state")
+            return state
+
+        with open(queries_path, "r") as f:
+            existing_queries = f.read()
+        
+        # Replace the entire getPageQuery variable declaration
+        # Pattern matches: export const getPageQuery = ... up to the semicolon
+        pattern = r'export\s+const\s+getPageQuery\s*=\s*.*?;'
+        
+        if re.search(pattern, existing_queries, re.DOTALL):
+            updated_queries = re.sub(pattern, new_getPageQuery.strip(), existing_queries, flags=re.DOTALL)
+            
+            with open(queries_path, "w") as f:
+                f.write(updated_queries)
+            
+            print(f"Successfully replaced getPageQuery in {queries_path}")
+        else:
+            print(f"getPageQuery variable not found in {queries_path}")
+        
+        return state
+
     except Exception as e:
         print(f"Error saving query: {e}")
-    return state
+        return state
 
 def design_typescript_type(state: ComponentState, prompt, design_typescript_type_model) -> ComponentState:
     """This node is in charge of designing the typescript type for the component"""
@@ -133,8 +172,6 @@ def design_sanity_schema(state: ComponentState, prompt, design_sanity_schema_mod
 def save_sanity_schema(state: ComponentState) -> ComponentState:
     """This node is in charge of saving the sanity schema for the component"""
     import os
-    import re
-    
     try:
         project_path = state.get("project_path", "")
         filename = state.get("sanity_schema_filename", "").strip()
@@ -238,12 +275,168 @@ def save_sanity_schema(state: ComponentState) -> ComponentState:
     return state
 
 def populate_component_data(state: ComponentState) -> ComponentState:
-    """This node is in charge of populating the component data"""
+    """
+    Populate Sanity CMS with component data extracted from Figma.
+    Uses global project state for configuration and database for component data.
+    """
+    from sqlmodel import select
+    from db.migration import SectionComponent, Page, ExtractedImage, create_db_and_tables
+    from ai_worker.utils.figma_extractor import extract_component_data
+    from ai_worker.utils.sanity_client import SanityClient
+    from ai_worker.utils.global_state import get_state
+    
     try:
-        # TODO: Implement component data population logic
-        pass
+        # Get global project state
+        project_state = get_state()
+        
+        # Validate Sanity configuration from global state
+        if not project_state.has_sanity_config():
+            print("⚠️  Sanity credentials not configured in project state. Skipping data population.")
+            print("   Run project initialization first or set credentials manually.")
+            return state
+        
+        # Extract component information from state
+        node_id = state.get("node_id")
+        schema_filename = state.get("sanity_schema_filename")
+        
+        if not node_id or not schema_filename:
+            print("⚠️  Missing required component data in state")
+            return state
+        
+        print(f"\n=== Populating data for component: {state['component_name']} ===")
+        
+        # 1. Query database for component, page, and embedded images
+        # This uses data already extracted and saved by figma_connection.py
+        print("  → Querying database for component data...")
+        session = create_db_and_tables("figma.db")
+        
+        try:
+            # Find the section component (already has raw_node_json and screenshot)
+            section = session.exec(
+                select(SectionComponent).where(SectionComponent.node_id == node_id)
+            ).first()
+            
+            if not section:
+                print(f"⚠️  Section component {node_id} not found in database")
+                return state
+            
+            # Get the page this component belongs to
+            page = session.exec(
+                select(Page).where(Page.page_id == section.page_id)
+            ).first()
+            
+            if not page:
+                print(f"⚠️  Page {section.page_id} not found in database")
+                return state
+            
+            # Get embedded images for this section (extracted by figma_connection.py)
+            embedded_images = session.exec(
+                select(ExtractedImage).where(ExtractedImage.section_node_id == node_id)
+            ).all()
+            
+            print(f"  → Component belongs to page: '{page.page_name}'")
+            print(f"  → Screenshot: {section.screenshot}")
+            print(f"  → Embedded images: {len(embedded_images)}")
+            
+            # Use the raw_node_json from database (already stored by figma_connection)
+            stored_json = section.raw_node_json
+            
+        finally:
+            session.close()
+        
+        # 2. Extract text from the stored Figma JSON
+        print("  → Extracting text data from stored Figma JSON...")
+        component_data = extract_component_data(stored_json)
+        texts = component_data.get("texts", [])
+        
+        print(f"  → Found {len(texts)} text elements and {len(embedded_images)} embedded images")
+        
+        # 3. Initialize Sanity client using global state
+        print("  → Connecting to Sanity CMS...")
+        sanity_client = SanityClient(
+            project_id=project_state.sanity_project_id,
+            dataset=project_state.sanity_dataset,
+            token=project_state.sanity_token,
+            api_version=project_state.sanity_api_version
+        )
+        
+        # 4. Upload embedded images to Sanity and get asset references
+        print("  → Uploading embedded images to Sanity...")
+        image_assets = {}
+        for img in embedded_images:
+            if not img.local_path:
+                continue
+            
+            try:
+                # Upload image to Sanity
+                asset = sanity_client.upload_image(
+                    img.local_path,
+                    filename=f"{img.node_name or 'image'}.png"
+                )
+                image_assets[img.node_id] = asset
+                print(f"    → Uploaded {img.node_name}: {asset.get('_id', 'unknown')}")
+            except Exception as e:
+                print(f"    ✗ Failed to upload {img.node_name}: {str(e)[:50]}")
+        
+        # 5. Create page slug from page name
+        page_slug = page.page_name.lower().replace(" ", "-").replace("_", "-")
+        
+        # 6. Build the component block with extracted data
+        print("  → Building component block...")
+        block = {
+            "_type": schema_filename,
+            "_key": node_id.replace(":", "_"),  # Sanity requires alphanumeric keys
+        }
+        
+        # Add text fields to the block
+        for idx, text_item in enumerate(texts):
+            field_name = text_item["name"].lower().replace(" ", "_").replace("-", "_")
+            if not field_name or field_name == "_":
+                field_name = f"text_{idx}"
+            block[field_name] = text_item["text"]
+        
+        # Add uploaded image references
+        for idx, img in enumerate(embedded_images):
+            asset = image_assets.get(img.node_id)
+            if not asset:
+                continue
+                
+            field_name = img.node_name.lower().replace(" ", "_").replace("-", "_")
+            if not field_name or field_name == "_":
+                field_name = f"image_{idx}"
+            
+            block[field_name] = {
+                "_type": "image",
+                "asset": {
+                    "_type": "reference",
+                    "_ref": asset.get("_id", "")
+                }
+            }
+        
+        print(f"  → Block fields: {list(block.keys())}")
+        
+        # 7. Create or update the page in Sanity
+        print(f"  → Creating/updating page '{page_slug}' in Sanity...")
+        try:
+            result = sanity_client.create_or_update_page(
+                title=page.page_name,
+                slug=page_slug,
+                block=block
+            )
+            print(f"  ✓ Successfully added block to page '{page_slug}'")
+            print(f"    Page ID: {result.get('_id', 'unknown')}")
+        except Exception as e:
+            print(f"  ✗ Error creating/updating Sanity page: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        print(f"=== Data population complete for {state['component_name']} ===\n")
+        
     except Exception as e:
         print(f"Error populating component data: {e}")
+        import traceback
+        traceback.print_exc()
+    
     return state
 
 def decide_if_done(state: ComponentState) -> str:

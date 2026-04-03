@@ -88,12 +88,26 @@ class OpenAI(Factory):
         messages = [{"role": "user", "content": content}]
         return self._make_request(messages, response_format={"type": "json_object"})
     
-    def design_query_model(self, prompt, system_prompt=None):
+    def design_query_model(self, prompt, state, queries_file, system_prompt=None):
         """Process design query"""
+
+        # 1. get the sanity schema of the component
+
+        sanity_schema = state.get('sanity_schema_code', '{}')
+
+        if len(sanity_schema) > 5000:
+            sanity_schema = sanity_schema[:5000] + "\n [truncated for token usage]"
+        
+        content = [
+            {"type": "text", "text": prompt},
+            {"type": "text", "text": f"\n\nSanity Schema:\n{sanity_schema}"},
+            {"type": "text", "text": f"\n\nQueries File:\n{queries_file}"}
+        ]
+
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
+        messages.append({"role": "user", "content": content})
         return self._make_request(messages)
     
     def design_typescript_type(self, prompt, context=None):
