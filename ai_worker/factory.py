@@ -50,11 +50,6 @@ class Factory(ABC):
         pass
 
     @abstractmethod
-    def design_typescript_type(self, prompt, context=None):
-        """Generate TypeScript type definitions"""
-        pass
-
-    @abstractmethod
-    def design_component_model(self, prompt, system_prompt=None, temperature=0.7):
-        """Generate component code"""
+    def design_component_model(self, prompt, state=None, system_prompt=None, temperature=0.7):
+        """Generate component code - accepts ComponentState with schema, query, and screenshot"""
         pass

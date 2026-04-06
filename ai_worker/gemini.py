@@ -77,14 +77,36 @@ class Gemini(Factory):
             prompt = f"{system_prompt}\n\n{prompt}"
         return self._make_request(prompt)
     
-    def design_typescript_type(self, prompt, context=None):
-        """Generate TypeScript type definitions"""
-        if context:
-            prompt = f"{context}\n\n{prompt}"
-        return self._make_request(prompt)
-    
-    def design_component_model(self, prompt, system_prompt=None, temperature=0.7):
-        """Generate component code"""
-        if system_prompt:
-            prompt = f"{system_prompt}\n\n{prompt}"
-        return self._make_request(prompt, temperature=temperature)
+    def design_component_model(self, prompt, state=None, system_prompt=None, temperature=0.7):
+        """Generate component code with schema, query, example, and screenshot context"""
+        if state:
+            # Build rich content with all context
+            parts = []
+            
+            if system_prompt:
+                parts.append(system_prompt + "\n\n")
+            
+            parts.append(prompt)
+            parts.append(f"\n\nComponent Metadata:\n- Name: {state.get('component_name', 'Unknown')}\n- Dimensions: {state.get('width', 0)}x{state.get('height', 0)}")
+            
+            # Add Sanity schema
+            if state.get('sanity_schema_code'):
+                parts.append(f"\n\nSanity Schema:\n```typescript\n{state.get('sanity_schema_code')}\n```")
+            
+            # Add query code
+            if state.get('query_code'):
+                parts.append(f"\n\nGROQ Query:\n```typescript\n{state.get('query_code')}\n```")
+            
+            # Add screenshot if available
+            screenshot_path = state.get('figma_screenshot')
+            if screenshot_path:
+                image_part = self._read_image_file(screenshot_path)
+                if image_part:
+                    parts.insert(1, image_part)
+            
+            combined_prompt = parts if any(isinstance(p, types.Part) for p in parts) else "\n".join(parts)
+            return self._make_request(combined_prompt, temperature=temperature)
+        else:
+            if system_prompt:
+                prompt = f"{system_prompt}\n\n{prompt}"
+            return self._make_request(prompt, temperature=temperature)

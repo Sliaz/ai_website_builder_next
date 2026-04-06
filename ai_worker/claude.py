@@ -92,14 +92,45 @@ class Claude(Factory):
         messages = [{"role": "user", "content": prompt}]
         return self._make_request(messages, system_prompt=system_prompt)
     
-    def design_typescript_type(self, prompt, context=None):
-        """Generate TypeScript type definitions"""
-        if context:
-            prompt = f"{context}\n\n{prompt}"
-        messages = [{"role": "user", "content": prompt}]
-        return self._make_request(messages)
-    
-    def design_component_model(self, prompt, system_prompt=None, temperature=0.7):
-        """Generate component code"""
-        messages = [{"role": "user", "content": prompt}]
-        return self._make_request(messages, system_prompt=system_prompt, temperature=temperature)
+    def design_component_model(self, prompt, state=None, system_prompt=None, temperature=0.7):
+        """Generate component code with schema, query, example, and screenshot context"""
+        if state:
+            # Build rich content with all context
+            content = [
+                {"type": "text", "text": prompt},
+                {"type": "text", "text": f"\n\nComponent Metadata:\n- Name: {state.get('component_name', 'Unknown')}\n- Dimensions: {state.get('width', 0)}x{state.get('height', 0)}"},
+            ]
+            
+            # Add Sanity schema
+            if state.get('sanity_schema_code'):
+                content.append({
+                    "type": "text", 
+                    "text": f"\n\nSanity Schema:\n```typescript\n{state.get('sanity_schema_code')}\n```"
+                })
+            
+            # Add query code
+            if state.get('query_code'):
+                content.append({
+                    "type": "text",
+                    "text": f"\n\nGROQ Query:\n```typescript\n{state.get('query_code')}\n```"
+                })
+            
+            # Add screenshot if available
+            screenshot_path = state.get('figma_screenshot')
+            if screenshot_path:
+                base64_image, media_type = self._encode_image_to_base64(screenshot_path)
+                if base64_image and media_type:
+                    content.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": base64_image
+                        }
+                    })
+            
+            messages = [{"role": "user", "content": content}]
+        else:
+            messages = [{"role": "user", "content": prompt}]
+        
+        return self._make_request(messages, system_prompt=system_prompt, temperature=temperature, max_tokens=8192)

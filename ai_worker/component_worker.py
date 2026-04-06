@@ -27,26 +27,256 @@ class ComponentState(TypedDict):
 
 def design_component(state: ComponentState, prompt: str, design_component_model) -> ComponentState:
     """This node is in charge of designing the next.js component"""
-    # this will be provided by the factory, to use the desired ai model
+    import json
+    from ai_worker.utils.prompts import generate_nextjs_component
+    
     try:
-        component = design_component_model(prompt, state)
-        state["component_code"] = component
+        # Example component to guide the AI
+        example_component = '''import {PortableTextBlock} from 'next-sanity'
+
+import ResolvedLink from '@/app/components/ResolvedLink'
+import PortableText from '@/app/components/PortableText'
+import Image from '@/app/components/SanityImage'
+import {stegaClean} from '@sanity/client/stega'
+import {ExtractPageBuilderType} from '@/sanity/lib/types'
+
+type CtaProps = {
+  block: ExtractPageBuilderType<'callToAction'>
+  index: number
+  pageType: string
+  pageId: string
+}
+
+export default function CTA({block}: CtaProps) {
+  const {heading, eyebrow, body = [], button, image, theme, contentAlignment} = block
+
+  const isDark = theme === 'dark'
+  const isImageFirst = stegaClean(contentAlignment) === 'imageFirst'
+
+  return (
+    <section className={isDark ? 'relative dark dark:bg-black' : 'relative dark:bg-black'}>
+      <div className="absolute inset-0 bg-size-[5px] bg-[url(/images/tile-1-black.png)] dark:bg-[url(/images/tile-1-white.png)] opacity-25" />
+      <div className="container relative">
+        <div className="grid lg:grid-cols-2 gap-12 py-12">
+          <div
+            className={`${isImageFirst && image ? 'row-start-2 lg:row-start-1 lg:col-start-2' : ''} flex flex-col gap-2 `}
+          >
+            {eyebrow && (
+              <span className="text-sm uppercase dark:text-white font-mono tracking-tight opacity-70">
+                {eyebrow}
+              </span>
+            )}
+            {heading && (
+              <h2 className="text-2xl md:text-3xl lg:text-4xl dark:text-white">{heading}</h2>
+            )}
+            {body && (
+              <div className="lg:text-left">
+                <PortableText value={body as PortableTextBlock[]} className="dark:prose-invert" />
+              </div>
+            )}
+
+            {button?.buttonText && button?.link && (
+              <div className="flex mt-4">
+                <ResolvedLink
+                  link={button?.link}
+                  className="rounded-full flex gap-2 font-mono text-sm whitespace-nowrap items-center bg-black dark:bg-white hover:bg-blue focus:bg-blue py-3 px-6 text-white dark:text-black dark:hover:text-white transition-colors duration-200"
+                >
+                  {button?.buttonText}
+                </ResolvedLink>
+              </div>
+            )}
+          </div>
+
+          {image?.asset?._ref && (
+            <Image
+              id={image.asset._ref}
+              alt="Demo image"
+              width={704}
+              crop={image.crop}
+              mode="cover"
+              className="rounded-sm"
+            />
+          )}
+        </div>
+      </div>
+    </section>
+  )
+}'''
+        
+        # Build comprehensive prompt with example
+        full_prompt = f"{generate_nextjs_component}\n\nExample Component for Reference:\n```tsx\n{example_component}\n```"
+        
+        # Call AI model with state containing schema, query, and screenshot
+        response = design_component_model(full_prompt, state)
+        
+        # Log the raw AI response
+        print("\n" + "="*80)
+        print(f"RAW AI RESPONSE for {state.get('component_name', 'UNKNOWN')}:")
+        print("="*80)
+        print(response)
+        print("="*80 + "\n")
+        
+        # Strip markdown code blocks if present (AI sometimes wraps in ```json...```)
+        response_clean = response.strip()
+        if response_clean.startswith('```'):
+            # Remove opening ```json or ``` and closing ```
+            lines = response_clean.split('\n')
+            if lines[0].startswith('```'):
+                lines = lines[1:]  # Remove first line
+            if lines and lines[-1].strip() == '```':
+                lines = lines[:-1]  # Remove last line
+            response_clean = '\n'.join(lines)
+        
+        # Parse JSON response
+        parsed_response = json.loads(response_clean)
+        
+        component_name = parsed_response.get("componentName", "").strip()
+        component_code = parsed_response.get("componentCode", "").strip()
+        
+        # Fallback to state component_name if AI didn't provide one
+        if not component_name:
+            component_name = state.get("component_name", "UnknownComponent")
+            print(f"⚠️  Warning: AI did not provide componentName, using state: {component_name}")
+        
+        if not component_code:
+            print(f"⚠️  Warning: AI provided empty component code for {component_name}")
+        
+        # Update state with parsed response
+        state["component_name"] = component_name
+        state["component_code"] = component_code
+        
+        print(f"✓ Parsed: componentName='{component_name}', code_length={len(component_code)} chars")
+        
+        return state
+    except json.JSONDecodeError as e:
+        print(f"❌ Error parsing JSON response: {e}")
+        print(f"Raw response: {response}")
+        state["component_code"] = ""
         return state
     except Exception as e:
         print(f"Error designing component: {e}")
+        import traceback
+        traceback.print_exc()
+        state["component_code"] = ""
         return state
 
-def save_component(state: ComponentState) -> ComponentState:
-    """This node is in charge of saving the next.js component"""
+def register_component_in_renderer(project_path: str, component_name: str, schema_type: str) -> bool:
+    """Register a component in the BlockRenderer.tsx file"""
+    import os
+    import re
+    
     try:
-        save_file("./components", state["component_code"], f"{state['component_name']}", "tsx")
-        # i could save the path in the db so reconstructing this afterwards is easy
+        renderer_path = os.path.join(project_path, "frontend", "app", "components", "BlockRenderer.tsx")
+        
+        if not os.path.exists(renderer_path):
+            print(f"⚠️  BlockRenderer.tsx not found at {renderer_path}")
+            return False
+        
+        with open(renderer_path, "r") as f:
+            content = f.read()
+        
+        # Check if component is already imported
+        import_statement = f"import {component_name} from '@/app/components/{component_name}'"
+        if import_statement in content:
+            print(f"  → Component {component_name} already imported in BlockRenderer.tsx")
+        else:
+            # Find the last import statement and add new import after it
+            import_lines = [line for line in content.split('\n') if line.strip().startswith('import') and '@/app/components/' in line]
+            if import_lines:
+                last_import = import_lines[-1]
+                content = content.replace(last_import, f"{last_import}\n{import_statement}")
+                print(f"  → Added import for {component_name}")
+            else:
+                # No component imports found, add after React import
+                react_import_match = re.search(r"(import React from 'react')", content)
+                if react_import_match:
+                    insert_pos = react_import_match.end()
+                    content = content[:insert_pos] + f"\n\n{import_statement}" + content[insert_pos:]
+                    print(f"  → Added import for {component_name}")
+        
+        # Check if component is already in Blocks object
+        block_entry = f"{schema_type}: {component_name}"
+        if block_entry in content:
+            print(f"  → Component {component_name} already registered in Blocks object")
+        else:
+            # Find the Blocks object and add the new entry
+            blocks_pattern = r'(const Blocks = \{[^}]*)(\n\})'  
+            blocks_match = re.search(blocks_pattern, content, re.DOTALL)
+            
+            if blocks_match:
+                # Add new entry before the closing brace
+                existing_blocks = blocks_match.group(1)
+                # Add comma after last entry if needed
+                if not existing_blocks.rstrip().endswith(','):
+                    content = content.replace(blocks_match.group(0), f"{existing_blocks},\n  {schema_type}: {component_name},\n}}")
+                else:
+                    content = content.replace(blocks_match.group(0), f"{existing_blocks}\n  {schema_type}: {component_name},\n}}")
+                print(f"  → Added {schema_type}: {component_name} to Blocks object")
+            else:
+                print(f"⚠️  Could not find Blocks object in BlockRenderer.tsx")
+                return False
+        
+        # Write updated content
+        with open(renderer_path, "w") as f:
+            f.write(content)
+        
+        print(f"✓ Registered {component_name} in BlockRenderer.tsx")
+        return True
+        
+    except Exception as e:
+        print(f"Error registering component in BlockRenderer: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def save_component(state: ComponentState) -> ComponentState:
+    """This node is in charge of saving the next.js component to frontend/app/components"""
+    import os
+    try:
+        project_path = state.get("project_path", "")
+        component_name = state.get("component_name", "").strip()
+        component_code = state.get("component_code", "").strip()
+        schema_filename = state.get("sanity_schema_filename", "").strip()
+        
+        # Validate component name
+        if not component_name:
+            print("❌ save_component: No component name in state, skipping save")
+            return state
+        
+        # Validate component code
+        if not component_code:
+            print(f"❌ save_component: Component code is empty for {component_name}, skipping save")
+            return state
+        
+        print(f"📝 Saving component: name='{component_name}', code_length={len(component_code)} chars")
+        
+        # Save to frontend/app/components/{ComponentName}.tsx
+        components_dir = os.path.join(project_path, "frontend", "app", "components")
+        os.makedirs(components_dir, exist_ok=True)
+        component_path = os.path.join(components_dir, f"{component_name}.tsx")
+        
+        with open(component_path, "w") as f:
+            f.write(component_code)
+        
+        print(f"✓ Saved component to: {component_path}")
+        
+        # Register component in BlockRenderer.tsx
+        if schema_filename:
+            print(f"📝 Registering component in BlockRenderer.tsx...")
+            register_component_in_renderer(project_path, component_name, schema_filename)
+        else:
+            print(f"⚠️  No schema_filename in state, skipping BlockRenderer registration")
+        
     except Exception as e:
         print(f"Error saving component: {e}")
+        import traceback
+        traceback.print_exc()
+    
     return state
 
 def design_query(state: ComponentState, prompt, design_query_model) -> ComponentState:
     """This node is in charge of designing the query for the component"""
+    import os
     try:
         project_path = state.get("project_path", "")
         queries_path = os.path.join(project_path, "frontend", "sanity", "lib", "queries.ts")
@@ -101,25 +331,6 @@ def save_query(state: ComponentState) -> ComponentState:
     except Exception as e:
         print(f"Error saving query: {e}")
         return state
-
-def design_typescript_type(state: ComponentState, prompt, design_typescript_type_model) -> ComponentState:
-    """This node is in charge of designing the typescript type for the component"""
-    try:
-        typescript_type = design_typescript_type_model(prompt, state)
-        state["typescript_type_code"] = typescript_type
-        return state
-    except Exception as e:
-        print(f"Error designing typescript type: {e}")
-        return state
-
-def save_typescript_type(state: ComponentState) -> ComponentState:
-    """This node is in charge of saving the typescript type for the component"""
-    try:
-        save_file("./types", state["typescript_type_code"], f"{state['component_name']}", "ts")
-        # i could save the path in the db so reconstructing this afterwards is easy
-    except Exception as e:
-        print(f"Error saving typescript type: {e}")
-    return state
 
 def design_sanity_schema(state: ComponentState, prompt, design_sanity_schema_model) -> ComponentState:
     """This node is in charge of designing the sanity schema for the component"""
@@ -471,7 +682,6 @@ def create_component_workflow():
     graph.add_node("save_sanity_schema", save_sanity_schema)
     graph.add_node("design_query", design_query)
     graph.add_node("save_query", save_query)
-    graph.add_node("design_typescript_type", design_typescript_type)
     graph.add_node("save_typescript_type", save_typescript_type)
     graph.add_node("design_component", design_component)
     graph.add_node("save_component", save_component)

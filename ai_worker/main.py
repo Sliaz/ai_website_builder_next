@@ -1,8 +1,17 @@
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from ai_worker.factory import Factory
-from ai_worker.component_worker import ComponentState, design_sanity_schema, save_sanity_schema, populate_component_data
-from ai_worker.utils.prompts import generate_sanity_schema
+from ai_worker.component_worker import (
+    ComponentState, 
+    design_sanity_schema, 
+    save_sanity_schema,
+    design_query,
+    save_query,
+    design_component,
+    save_component,
+    populate_component_data
+)
+from ai_worker.utils.prompts import generate_sanity_schema, generate_query, generate_nextjs_component
 from sqlmodel import Session, select
 from db.migration import SectionComponent, create_db_and_tables
 from pathlib import Path
@@ -94,26 +103,53 @@ def process_single_component(component_data: dict, ai_client, project_path: str)
         }
         
         # 2. Design sanity schema
-        print(f"[{component_name}] Calling AI to generate schema...")
-        state_after_design = design_sanity_schema(
+        print(f"[{component_name}] 📋 Generating Sanity schema...")
+        state = design_sanity_schema(
             initial_state, 
             generate_sanity_schema, 
             ai_client.design_sanity_schema_model
         )
         
         # 3. Save sanity schema
-        print(f"[{component_name}] Saving schema to project...")
-        state_after_saving = save_sanity_schema(state_after_design)
+        print(f"[{component_name}] 💾 Saving schema...")
+        state = save_sanity_schema(state)
         
-        print(f"[{component_name}] ✓ Complete - Schema: {state_after_saving.get('sanity_schema_filename', 'unknown')}.ts")
-
-        final_state = populate_component_data(state_after_saving)
+        # 4. Design query
+        print(f"[{component_name}] 🔍 Generating GROQ query...")
+        state = design_query(
+            state,
+            generate_query,
+            ai_client.design_query_model
+        )
+        
+        # 5. Save query
+        print(f"[{component_name}] 💾 Saving query...")
+        state = save_query(state)
+        
+        # 6. Design component
+        print(f"[{component_name}] ⚛️  Generating Next.js component...")
+        state = design_component(
+            state,
+            generate_nextjs_component,
+            ai_client.design_component_model
+        )
+        
+        # 7. Save component (also registers in BlockRenderer.tsx)
+        print(f"[{component_name}] 💾 Saving component & registering...")
+        state = save_component(state)
+        
+        # 8. Populate Sanity CMS with data
+        print(f"[{component_name}] 📊 Populating CMS data...")
+        final_state = populate_component_data(state)
+        
+        print(f"[{component_name}] ✅ Complete! Component: {final_state.get('component_name', 'unknown')}.tsx")
 
         return {
             "component_data": component_data,
             "status": "success",
             "error": None,
-            "schema_filename": final_state.get("sanity_schema_filename", "")
+            "schema_filename": final_state.get("sanity_schema_filename", ""),
+            "component_name": final_state.get("component_name", "")
         }
 
 
@@ -229,8 +265,8 @@ def main():
                     results.append(result)
                     
                     status_symbol = "✓" if result["status"] == "success" else "✗"
-                    schema_info = f" ({result.get('schema_filename', 'N/A')}.ts)" if result["status"] == "success" else ""
-                    print(f"[{completed}/{len(components)}] {status_symbol} {component['name']}{schema_info}")
+                    component_info = f" → {result.get('component_name', 'N/A')}.tsx" if result["status"] == "success" else ""
+                    print(f"[{completed}/{len(components)}] {status_symbol} {component['name']}{component_info}")
                     
                 except Exception as exc:
                     print(f"[{completed}/{len(components)}] ✗ {component['name']} generated exception: {exc}")
@@ -248,8 +284,11 @@ def main():
         print(f"✗ Failed: {failed}")
         
         if successful > 0:
-            print(f"\n📁 Schemas saved to: {project_path}/studio/src/schemaTypes/objects/")
-            print(f"📝 Index updated at: {project_path}/studio/src/schemaTypes/index.ts")
+            print(f"\n📁 Output locations:")
+            print(f"   • Schemas: {project_path}/studio/src/schemaTypes/objects/")
+            print(f"   • Components: {project_path}/frontend/app/components/")
+            print(f"   • Queries: {project_path}/frontend/sanity/lib/queries.ts")
+            print(f"   • BlockRenderer: {project_path}/frontend/app/components/BlockRenderer.tsx")
         
         return ai_client
         
