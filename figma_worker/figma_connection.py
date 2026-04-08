@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 import time
 from io import BytesIO
+from typing import Dict, List, Optional
 
 import requests
 from PIL import Image

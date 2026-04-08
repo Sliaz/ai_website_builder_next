@@ -12,15 +12,15 @@ class Settings(BaseSettings):
     figma_api_key: Optional[str] = None
 
     # Project settings
-    id: str = None
-    name: str = None
-    description: str = None
-    project_path: str = None
-    figma_database_name: str = None
-    figma_file_key: str = None
-    sanity_project_id: str = None
-    sanity_dataset: str = None
-    sanity_api_read_token: str = None
+    id: str = ""
+    name: str = ""
+    description: str = ""
+    project_path: str = ""
+    figma_database_name: str = ""
+    figma_file_key: str = ""
+    sanity_project_id: str = ""
+    sanity_dataset: str = ""
+    sanity_api_read_token: str = ""
     started_at: Optional[str] = None
     updated_at: Optional[str] = None
 

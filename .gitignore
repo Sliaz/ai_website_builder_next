@@ -19,6 +19,6 @@ figma_images/
 
 # the datbase ofc
 
-figma.db
+*.db
 
 logs.txt

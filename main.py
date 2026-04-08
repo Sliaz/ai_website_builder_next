@@ -30,7 +30,7 @@ def main():
 
     # Create database and tables
     from db.state import create_db_and_tables
-    create_db_and_tables()
+    session = create_db_and_tables()
 
     # create the settings object to pass to the workers
 
@@ -39,9 +39,13 @@ def main():
     statement = select(Project).order_by(
         Project.started_at
     )
-    projects = session.exec(statement).all()
+    projects = list(session.exec(statement).all())
 
-    projects.append("Start a new Project")
+    # Create a simple object for the "new project" option
+    class NewProjectOption:
+        name = "Start a new project"
+    
+    projects.append(NewProjectOption())
 
     print("What project do you want to work on?")
 
@@ -56,7 +60,7 @@ def main():
 
     selected_project = projects[int(what_project) - 1]
 
-    if int(what_project) == len(projects) - 1:
+    if int(what_project) == len(projects):
         print("Starting a new project...")
         init_project()
         ask_what_to_do()
