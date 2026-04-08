@@ -21,6 +21,8 @@ def main():
 
     figma_project_key = settings.figma_file_key
 
+    settings.update_settings()
+
     canvas_name = str(input("Enter the Figma Page/Canvas name (leave blank for Delivery): ")).strip()
     start_canvas_name = canvas_name or "Delivery"
 

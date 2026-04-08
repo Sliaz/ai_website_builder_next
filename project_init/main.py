@@ -182,26 +182,6 @@ def init_project_degit():
         print(f"\n✗ Unexpected error: {e}")
         return
     
-    # Step 3: Initialize Sanity
-    print(f"\nStep 3: Initializing Sanity Studio...")
-    print("This will register the studio and configure your project.")
-    print("-"*60)
-    
-    sanity_init_cmd = ["npx", "sanity", "init"]
-    
-    try:
-        run(sanity_init_cmd, cwd=OUTPUT_DIR)
-        print("✓ Sanity Studio initialized successfully!")
-    except subprocess.CalledProcessError as e:
-        print(f"\n⚠️  Sanity init failed (exit code {e.returncode})")
-        print("You may need to run this manually:")
-        print(f"  cd {OUTPUT_DIR}")
-        print(f"  npx sanity init")
-        # Don't return here - continue with the rest of the setup
-    except Exception as e:
-        print(f"\n⚠️  Sanity init error: {e}")
-        print("You may need to run this manually later.")
-    
     # Extract project configuration
     config = get_project_config(OUTPUT_DIR)
     
@@ -284,6 +264,8 @@ def init_project_degit():
     settings.sanity_api_read_token = ""
     settings.started_at = ""
     settings.updated_at = ""
+
+    settings.update_settings()
 
 
 def init_project():
@@ -440,6 +422,8 @@ def init_project():
     settings.sanity_api_read_token = ""
     settings.started_at = ""
     settings.updated_at = ""
+
+    settings.update_settings()
 
 
 def main():
