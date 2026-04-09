@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 from config import settings
+from .git_init import setup_github_repository
 
 # Add parent directory to path for imports
 if __package__ is None or __package__ == "":
@@ -266,6 +267,12 @@ def init_project_degit():
     settings.updated_at = ""
 
     settings.update_settings()
+    
+    setup_github_repository(
+    project_path=str(OUTPUT_DIR),
+    project_name=project_name,
+    description=description,
+)
 
 
 def init_project():
@@ -424,6 +431,12 @@ def init_project():
     settings.updated_at = ""
 
     settings.update_settings()
+    
+    setup_github_repository(
+    project_path=str(OUTPUT_DIR),
+    project_name=project_name,
+    description=description,
+)
 
 
 def main():
