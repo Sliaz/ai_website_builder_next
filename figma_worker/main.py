@@ -29,7 +29,7 @@ def main():
     figma_connection = FigmaConnection(
         settings.figma_api_key,
         figma_project_key,
-        db_path=settings.project_name,
+        db_path=settings.name,
         start_canvas_name=start_canvas_name,
         fetch_screenshots=True,
     )

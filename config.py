@@ -1,6 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
-from db.models import Project
+from db.state import Project
 from sqlmodel import select
 
 class Settings(BaseSettings):

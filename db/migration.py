@@ -189,5 +189,4 @@ def create_db_and_tables(db_path: str = "figma.db") -> Session:
         connect_args={"check_same_thread": False},
     )
     SQLModel.metadata.create_all(engine)
-    _ensure_section_component_screenshot_column(engine)
     return Session(engine)
